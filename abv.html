@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Приёмник</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            text-align: center;
+            user-select: none;
+        }
+        .icon {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: #141414;
+            border: 2px solid #2a2a2a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 24px;
+            transition: all 0.3s ease;
+        }
+        .icon.active {
+            border-color: #f97316;
+            box-shadow: 0 0 60px rgba(249, 115, 22, 0.6);
+            transform: scale(1.15);
+        }
+        .icon svg { color: #f97316; }
+        h1 { font-size: 1.6rem; margin-bottom: 8px; font-weight: 600; }
+        .status { color: #888; font-size: 0.9rem; margin-bottom: 24px; }
+        .last-text {
+            background: #141414;
+            border: 1px solid #2a2a2a;
+            border-radius: 12px;
+            padding: 20px 24px;
+            max-width: 500px;
+            width: 100%;
+            font-size: 1rem;
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .hint { margin-top: 16px; color: #555; font-size: 0.8rem; }
+        .lock-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.95);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            z-index: 9999;
+            color: #f97316;
+            font-size: 1.2rem;
+        }
+        .lock-overlay.show { display: flex; }
+    </style>
+</head>
+<body>
+    <div class="icon" id="icon">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+        </svg>
+    </div>
+    <h1>Приёмник</h1>
+    <p class="status">Ожидание сигнала...</p>
+    <div class="last-text" id="lastText">—</div>
+    <p class="hint">Не закрывай эту вкладку. Звук появится автоматически.</p>
+
+    <div class="lock-overlay" id="lockOverlay">
+        <p>🔒 Приёмник активен</p>
+        <p style="font-size: 0.8rem; color: #888; margin-top: 8px;">Не выключай устройство</p>
+    </div>
+
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyDjOn8OUYlnMjGWIqTIfHYpToltMfvpDLk",
+            authDomain: "black-belt-9e72e.firebaseapp.com",
+            databaseURL: "https://black-belt-9e72e-default-rtdb.firebaseio.com",
+            projectId: "black-belt-9e72e",
+            storageBucket: "black-belt-9e72e.firebasestorage.app",
+            messagingSenderId: "838619528149",
+            appId: "1:838619528149:web:2a275f4a90900e3d2e5b5c"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+
+        const icon = document.getElementById('icon');
+        const lastText = document.getElementById('lastText');
+        const statusEl = document.querySelector('.status');
+        const lockOverlay = document.getElementById('lockOverlay');
+
+        let lastTimestamp = 0;
+        let audioContext = null;
+        let isSpeaking = false;
+
+        // ================= ЗАЩИТА ОТ ЗАКРЫТИЯ =================
+        window.addEventListener('beforeunload', (e) => {
+            e.preventDefault();
+            e.returnValue = '';
+            return '';
+        });
+
+        // Блокировка клавиш (F5, Ctrl+W, Ctrl+R, Alt+F4)
+        document.addEventListener('keydown', (e) => {
+            if (
+                e.key === 'F5' ||
+                (e.ctrlKey && e.key === 'w') ||
+                (e.ctrlKey && e.key === 'r') ||
+                (e.altKey && e.key === 'F4') ||
+                e.key === 'Escape'
+            ) {
+                e.preventDefault();
+                e.stopPropagation();
+                return false;
+            }
+        });
+
+        // Защита от потери фокуса — перезапуск аудио
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && audioContext && audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        });
+
+        // ================= АУДИО =================
+        function initAudio() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        }
+
+        // Функция громкой озвучки через Web Audio API
+        async function speakLoud(text) {
+            if (isSpeaking) return;
+            isSpeaking = true;
+
+            initAudio();
+
+            // Создаём источник из речи
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'ru-RU';
+            utterance.rate = 1.0;
+            utterance.pitch = 1.0;
+            utterance.volume = 1.0;
+
+            // Ищем русский голос
+            const voices = speechSynthesis.getVoices();
+            const ruVoice = voices.find(v => v.lang.startsWith('ru'));
+            if (ruVoice) utterance.voice = ruVoice;
+
+            // Подключаем к Web Audio для усиления
+            try {
+                const stream = audioContext.createMediaStreamDestination();
+                // Web Speech API не даёт прямой доступ к потоку, поэтому используем обходной путь:
+                // Просто увеличиваем громкость через системные настройки + повторяем несколько раз
+            } catch (e) {
+                console.log('Web Audio усиление недоступно');
+            }
+
+            // Повторяем фразу 3 раза для громкости и надёжности
+            for (let i = 0; i < 3; i++) {
+                await new Promise((resolve) => {
+                    const u = new SpeechSynthesisUtterance(text);
+                    u.lang = 'ru-RU';
+                    u.rate = 1.0;
+                    u.pitch = 1.0;
+                    u.volume = 1.0;
+                    if (ruVoice) u.voice = ruVoice;
+                    u.onend = resolve;
+                    u.onerror = resolve;
+                    speechSynthesis.speak(u);
+                });
+
+                // Небольшая пауза между повторами
+                await new Promise(r => setTimeout(r, 300));
+            }
+
+            isSpeaking = false;
+        }
+
+        speechSynthesis.onvoiceschanged = () => {
+            speechSynthesis.getVoices();
+        };
+
+        // ================= FIREBASE =================
+        db.ref('sound').on('value', (snapshot) => {
+            const data = snapshot.val();
+            if (!data) return;
+            if (data.timestamp === lastTimestamp) return;
+            lastTimestamp = data.timestamp;
+
+            lastText.textContent = data.text;
+            statusEl.textContent = '🔊 Воспроизведение...';
+
+            // Показываем оверлей (типо "не выключай")
+            lockOverlay.classList.add('show');
+            setTimeout(() => lockOverlay.classList.remove('show'), 5000);
+
+            icon.classList.add('active');
+
+            speakLoud(data.text).then(() => {
+                icon.classList.remove('active');
+                statusEl.textContent = 'Ожидание сигнала...';
+            });
+        });
+
+        // ================= АВТОЗАПУСК =================
+        // Принудительная инициализация аудио после первого клика
+        document.addEventListener('click', () => {
+            initAudio();
+        }, { once: true });
+
+        // Перезапуск аудиоконтекста каждые 10 секунд (на случай зависания)
+        setInterval(() => {
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        }, 10000);
+    </script>
+</body>
+</html>
